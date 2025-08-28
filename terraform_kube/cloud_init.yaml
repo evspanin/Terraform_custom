@@ -1,0 +1,95 @@
+#cloud-config
+write_files:
+  - path: /root/pre_setting.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -xe
+
+      apt update
+      apt upgrade -y
+      apt install software-properties-common ubuntu-drivers-common wget curl gnupg2 gpg nano vim -y
+      modprobe -v overlay vxlan br_netfilter nf_conntrack
+
+      cat > /etc/modules-load.d/kubernetes.conf << EOF
+      overlay
+      vxlan
+      br_netfilter
+      nf_conntrack
+      EOF
+
+      cat > /etc/sysctl.d/kubernetes.conf << EOF
+      net.ipv4.ip_forward=1
+      net.ipv4.conf.all.rp_filter=0
+      net.ipv4.conf.default.rp_filter=0
+      net.ipv6.conf.all.disable_ipv6=1
+      net.ipv6.conf.default.disable_ipv6=1
+      net.bridge.bridge-nf-call-iptables=1
+      EOF
+
+      sysctl --system
+
+      cat > /etc/hosts << EOF
+      127.0.0.1 localhost
+      10.180.60.3 k8s-master
+      10.180.60.4 k8s-worker01
+      10.180.60.5 k8s-worker02
+      10.180.60.6 k8s-worker03
+      10.180.60.7 k8s-ceph
+      EOF
+
+  - path: /root/install_containerd.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -xe
+
+      wget https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
+      wget https://github.com/containerd/containerd/releases/download/v2.1.3/containerd-2.1.3-linux-amd64.tar.gz
+      wget https://github.com/opencontainers/runc/releases/download/v1.3.0/runc.amd64
+      wget https://github.com/containernetworking/plugins/releases/download/v1.7.1/cni-plugins-linux-amd64-v1.7.1.tgz
+      wget https://github.com/containerd/nerdctl/releases/download/v2.1.2/nerdctl-2.1.2-linux-amd64.tar.gz
+      wget https://github.com/moby/buildkit/releases/download/v0.23.1/buildkit-v0.23.1.linux-amd64.tar.gz
+
+      mkdir -p /etc/containerd /opt/cni/bin /usr/local/lib/systemd/system
+
+      tar Cxzvf /usr/local/ containerd-2.1.3-linux-amd64.tar.gz
+      /usr/local/bin/containerd config default > /etc/containerd/config.toml || true
+
+      tar Cxvf /usr/local/ buildkit-v0.23.1.linux-amd64.tar.gz || true
+      install -m 0755 runc.amd64 /usr/local/sbin/runc
+      tar Cxvf /usr/local/bin/ nerdctl-2.1.2-linux-amd64.tar.gz
+      tar Cxvzf /opt/cni/bin cni-plugins-linux-amd64-v1.7.1.tgz
+
+      cp containerd.service /usr/local/lib/systemd/system/
+      cp containerd.service buildkitd.service || true
+      sed -i 's|ExecStart=/usr/local/bin/containerd|ExecStart=/usr/local/bin/buildkitd|g' buildkitd.service || true
+      cp buildkitd.service /usr/local/lib/systemd/system/ || true
+
+      systemctl daemon-reload
+      systemctl enable --now containerd || true
+      systemctl enable --now buildkitd || true
+
+  - path: /root/install_k8s.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -xe
+
+      apt-get update
+      apt-get install -y curl gnupg2 ca-certificates wget apt-transport-https docker.io
+
+      curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      mkdir -p /etc/apt/keyrings
+      echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+
+      apt-get update
+      apt-get install -y kubelet kubeadm kubectl
+      apt-mark hold kubelet kubeadm kubectl
+
+runcmd:
+  - [ bash, -c, "/root/pre_setting.sh >> /var/log/cloud-init-pre_setting.log 2>&1" ]
+  - [ bash, -c, "/root/install_containerd.sh >> /var/log/cloud-init-containerd.log 2>&1" ]
+  - [ bash, -c, "/root/install_k8s.sh >> /var/log/cloud-init-k8s.log 2>&1" ]
+
+final_message: "Cloud-init finished"
